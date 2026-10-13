@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from importlib import import_module
 
-from .config import settings
+from .config import get_settings
 
 # Adapter name -> "module:function" serving it. Imported lazily, so an adapter's
 # protocol dependencies load only when it is selected.
@@ -21,7 +21,7 @@ ADAPTERS: dict[str, str] = {
 
 def adapter(name: str | None = None) -> Callable[[], None]:
     """Return the serve function for adapter *name* (default: the configured one)."""
-    name = name or settings.scan_gate_adapter
+    name = name or get_settings().scan_gate_adapter
     try:
         target = ADAPTERS[name]
     except KeyError:

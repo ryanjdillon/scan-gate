@@ -49,7 +49,9 @@ now means exactly `CORPUS_SCAN_GATE_PASS_UNPARSEABLE`:
 - set alone, it sets `PASS_UNPARSEABLE`, and the gate logs one deprecation
   warning at startup;
 - set together with `PASS_UNPARSEABLE` to the same value, it is ignored (and
-  still warned about); to a different value, the gate refuses to start;
+  still warned about); to a different value, the gate refuses to start,
+  printing one `scan-gate: invalid configuration: …` line and exiting with
+  code 2;
 - it never passes a body the policy raised on.
 
 Credentials are detected with corpus-detect's local credential rules only; the

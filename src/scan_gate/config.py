@@ -6,6 +6,7 @@ corpus image, so a deployment changes only its image and command.
 
 from __future__ import annotations
 
+from functools import cache
 from typing import Self
 
 from pydantic import model_validator
@@ -76,4 +77,11 @@ class Settings(BaseSettings):
         return [FAIL_OPEN_DEPRECATION] if self.scan_gate_fail_open is not None else []
 
 
-settings = Settings()
+@cache
+def get_settings() -> Settings:
+    """The settings loaded from the environment, read on first use.
+
+    Loading is deferred from import so an invalid environment fails where the
+    command can report it, not as an import-time traceback.
+    """
+    return Settings()

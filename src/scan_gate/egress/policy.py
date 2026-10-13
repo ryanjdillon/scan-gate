@@ -38,7 +38,7 @@ from typing import Any
 
 from corpus_detect import Span, redact
 
-from ..config import Settings, settings
+from ..config import Settings, get_settings
 
 log = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ class EgressPolicy:
     @classmethod
     def from_settings(cls, config: Settings | None = None) -> EgressPolicy:
         """Build the policy from ``CORPUS_SCAN_GATE_*`` settings (default: the loaded ones)."""
-        config = config or settings
+        config = config or get_settings()
         return cls(
             pass_unparseable=config.pass_unparseable,
             block_types=_names(config.scan_gate_block_types),

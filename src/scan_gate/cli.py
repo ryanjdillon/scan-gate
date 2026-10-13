@@ -6,9 +6,10 @@ import logging
 from collections.abc import Callable
 
 import click
+from pydantic import ValidationError
 
 from . import adapters
-from .config import Settings, settings
+from .config import Settings, get_settings
 from .telemetry import Telemetry, telemetry
 
 #: The OTel service name when ``OTEL_SERVICE_NAME`` is unset.
@@ -20,9 +21,13 @@ log = logging.getLogger(__name__)
 def run(
     serve: Callable[[], None] = adapters.serve,
     otel: Telemetry = telemetry,
-    config: Settings = settings,
+    config: Settings | None = None,
 ) -> None:
-    """Warn of deprecated settings, configure telemetry, serve, then flush telemetry."""
+    """Warn of deprecated settings, configure telemetry, serve, then flush telemetry.
+
+    ``config`` defaults to the settings loaded from the environment.
+    """
+    config = config or get_settings()
     for message in config.deprecations():
         log.warning(message)
     otel.configure(SERVICE_NAME)
@@ -46,7 +51,15 @@ def main(ctx: click.Context) -> None:
     """
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     # run()'s collaborators may be injected through the context object.
-    run(**(ctx.obj or {}))
+    collaborators = dict(ctx.obj or {})
+    if "config" not in collaborators:
+        try:
+            collaborators["config"] = get_settings()
+        except ValidationError as exc:
+            reasons = "; ".join(error["msg"] for error in exc.errors())
+            click.echo(f"scan-gate: invalid configuration: {reasons}", err=True)
+            ctx.exit(2)
+    run(**collaborators)
 
 
 if __name__ == "__main__":  # pragma: no cover
