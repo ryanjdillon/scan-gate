@@ -8,6 +8,14 @@ authentication sets it before ext_proc runs), applies
 :class:`~scan_gate.egress.policy.Verdict` into a ProcessingResponse. Every other
 phase is acknowledged unchanged.
 
+A body message is scanned as a whole body whether or not it carries
+``end_of_stream``: in Buffered mode a request with trailers arrives as one body
+message with ``end_of_stream`` false. The flag matters only to an unparseable
+body, which the policy refuses (``unbuffered``) unless it is complete. A body
+message is complete when it carries ``end_of_stream`` and no body message came
+before it on the stream; a later one is a continuation of a streamed body, and
+its bytes alone are not the request.
+
 The ext_proc stubs are vendored under ``scan_gate._ext_proc``: the minimal
 protoc-generated closure of ``envoy.service.ext_proc.v3``, with imports rewritten
 to that private namespace. The published ``xds-protos`` wheel also ships a stale
@@ -28,7 +36,7 @@ from .._ext_proc.envoy.service.ext_proc.v3 import external_processor_pb2 as ep
 from .._ext_proc.envoy.service.ext_proc.v3 import external_processor_pb2_grpc as epg
 from .._ext_proc.envoy.type.v3 import http_status_pb2 as hs
 from ..config import settings
-from .policy import PASS, EgressPolicy, Verdict, inspect, refusal
+from .policy import EgressPolicy, Verdict, inspect, refusal
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +103,11 @@ def client_id(headers: ep.HttpHeaders) -> str | None:
     return None
 
 
+def _scan_error() -> Verdict:
+    """The refusal for a body the policy failed on: a fixed reason, no exception detail."""
+    return refusal(403, "egress_policy", "request could not be inspected", "scan_error")
+
+
 class EgressProcessor(epg.ExternalProcessorServicer):
     """ext_proc servicer applying the egress policy to the request body."""
 
@@ -106,39 +119,25 @@ class EgressProcessor(epg.ExternalProcessorServicer):
         self._policy = policy
         self._inspect = inspect
 
-    def _decide(self, body: bytes, caller: str | None) -> Verdict:
-        """Apply the policy; an error inside it is answered, never left to the proxy.
+    def _decide(self, body: bytes, caller: str | None, *, complete: bool) -> Verdict:
+        """Apply the policy; an error inside it is refused, never passed or left to the proxy.
 
         An exception would end the gRPC stream, and a fail-closed proxy would then
-        return a bare 5xx with nothing in the egress log. Refuse instead (or pass,
-        when failing open), logging only the exception's type.
+        return a bare 5xx with nothing in the egress log. Passing would send the
+        body out unscanned. So any error is refused, whatever the policy's
+        settings. Only the exception's type is logged (its message may quote the
+        body), and the response carries a fixed reason.
         """
         try:
             policy = self._policy()
         except Exception as exc:  # noqa: BLE001 - any failure must become an answer
             log.warning("egress: policy unavailable (%s); refusing", type(exc).__name__)
-            return refusal(
-                403,
-                "egress_policy",
-                "request could not be inspected",
-                f"error {type(exc).__name__}",
-            )
+            return _scan_error()
         try:
-            return self._inspect(body, caller, policy=policy)
+            return self._inspect(body, caller, policy=policy, complete=complete)
         except Exception as exc:  # noqa: BLE001 - any failure must become an answer
-            log.warning(
-                "egress: policy raised %s; %s",
-                type(exc).__name__,
-                "passing" if policy.fail_open else "refusing",
-            )
-            if policy.fail_open:
-                return PASS
-            return refusal(
-                403,
-                "egress_policy",
-                "request could not be inspected",
-                f"error {type(exc).__name__}",
-            )
+            log.warning("egress: policy raised %s; refusing", type(exc).__name__)
+            return _scan_error()
 
     def Process(
         self,
@@ -152,10 +151,14 @@ class EgressProcessor(epg.ExternalProcessorServicer):
         belongs to its body phase.
         """
         caller: str | None = None
+        seen_body = False
         for request in request_iterator:
             phase = request.WhichOneof("request")
             if phase == "request_body":
-                yield to_response(self._decide(request.request_body.body, caller))
+                chunk = request.request_body
+                complete = chunk.end_of_stream and not seen_body
+                seen_body = True
+                yield to_response(self._decide(chunk.body, caller, complete=complete))
             elif phase == "request_headers":
                 caller = client_id(request.request_headers)
                 yield ep.ProcessingResponse(request_headers=ep.HeadersResponse())

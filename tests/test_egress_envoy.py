@@ -14,6 +14,7 @@ import pytest
 
 from scan_gate._ext_proc.envoy.config.core.v3 import base_pb2 as core
 from scan_gate._ext_proc.envoy.service.ext_proc.v3 import external_processor_pb2 as ep
+from scan_gate.config import Settings
 from scan_gate.egress import envoy
 from scan_gate.egress.policy import EgressPolicy, Verdict
 
@@ -46,9 +47,15 @@ def headers(**values: str) -> ep.ProcessingRequest:
     )
 
 
-def body(content: str) -> ep.ProcessingRequest:
+def body(content: str, *, final: bool = True) -> ep.ProcessingRequest:
     payload = {"model": "DeepSeek-V4-Flash", "messages": [{"role": "user", "content": content}]}
-    return ep.ProcessingRequest(request_body=ep.HttpBody(body=json.dumps(payload).encode()))
+    return ep.ProcessingRequest(
+        request_body=ep.HttpBody(body=json.dumps(payload).encode(), end_of_stream=final)
+    )
+
+
+def raw_body(data: bytes, *, final: bool) -> ep.ProcessingRequest:
+    return ep.ProcessingRequest(request_body=ep.HttpBody(body=data, end_of_stream=final))
 
 
 def test_redacted_body_replaces_and_drops_content_length(processor, context):
@@ -121,21 +128,57 @@ def failing_inspect():
     return create_autospec(envoy.inspect, side_effect=ValueError)
 
 
-def test_inspection_error_is_refused_when_failing_closed(context, failing_inspect):
+@pytest.mark.parametrize("pass_unparseable", [False, True])
+def test_inspection_error_is_always_refused(context, failing_inspect, pass_unparseable):
     processor = envoy.EgressProcessor(
-        policy=lambda: EgressPolicy(fail_open=False), inspect=failing_inspect
+        policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable), inspect=failing_inspect
     )
     (response,) = processor.Process(iter([body("hi")]), context)
-    assert response.immediate_response.status.code == 403
-    assert "ValueError" in response.immediate_response.details
+    immediate = response.immediate_response
+    assert immediate.status.code == 403
+    assert json.loads(immediate.body) == {
+        "error": {"type": "egress_policy", "message": "request could not be inspected"}
+    }
+    assert immediate.details == "egress policy: scan_error"
 
 
-def test_inspection_error_passes_when_failing_open(context, failing_inspect):
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {"CORPUS_SCAN_GATE_PASS_UNPARSEABLE": "true"},
+        {"CORPUS_SCAN_GATE_FAIL_OPEN": "true"},
+        {"CORPUS_SCAN_GATE_PASS_UNPARSEABLE": "true", "CORPUS_SCAN_GATE_FAIL_OPEN": "true"},
+    ],
+)
+def test_no_setting_passes_an_inspection_error(monkeypatch, context, env):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    loaded = Settings()
+    detector = create_autospec(envoy.inspect, side_effect=RuntimeError("leaked AKIAIOSFODNN7EXAMPLE"))
     processor = envoy.EgressProcessor(
-        policy=lambda: EgressPolicy(fail_open=True), inspect=failing_inspect
+        policy=lambda: EgressPolicy.from_settings(loaded), inspect=detector
     )
     (response,) = processor.Process(iter([body("hi")]), context)
-    assert response.request_body.response.status == ep.CommonResponse.CONTINUE
+    immediate = response.immediate_response
+    assert immediate.status.code == 403
+    # Neither the exception's type nor its message reaches the response.
+    for text in (immediate.body.decode(), immediate.details):
+        assert "AKIA" not in text and "RuntimeError" not in text
+
+
+def test_unparseable_body_follows_pass_unparseable(context):
+    multipart = ep.ProcessingRequest(
+        request_body=ep.HttpBody(
+            body=b"--boundary\r\nContent-Type: audio/wav\r\n\r\nRIFF", end_of_stream=True
+        )
+    )
+    closed = envoy.EgressProcessor(policy=lambda: EgressPolicy(pass_unparseable=False))
+    (refused,) = closed.Process(iter([multipart]), context)
+    assert refused.immediate_response.status.code == 403
+    opened = envoy.EgressProcessor(policy=lambda: EgressPolicy(pass_unparseable=True))
+    (passed,) = opened.Process(iter([multipart]), context)
+    assert passed.request_body.response.status == ep.CommonResponse.CONTINUE
 
 
 def test_pass_verdict_maps_to_continue():
@@ -158,3 +201,59 @@ def test_unavailable_policy_is_refused(context):
     processor = envoy.EgressProcessor(policy=broken_policy)
     (response,) = processor.Process(iter([body("hi")]), context)
     assert response.immediate_response.status.code == 403
+    assert "bad config" not in response.immediate_response.details
+
+
+
+def unbuffered(response: ep.ProcessingResponse) -> bool:
+    immediate = response.immediate_response
+    return (
+        immediate.status.code == 403
+        and json.loads(immediate.body)["error"]["type"] == "egress_policy"
+        and immediate.details == "egress policy: unbuffered"
+    )
+
+
+@pytest.mark.parametrize("pass_unparseable", [False, True])
+def test_non_final_unparseable_chunk_is_refused_unbuffered(context, pass_unparseable):
+    processor = envoy.EgressProcessor(
+        policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable)
+    )
+    partial = raw_body(b'{"model": "DeepSeek-V4-Flash", "messa', final=False)
+    (response,) = processor.Process(iter([partial]), context)
+    assert unbuffered(response)
+
+
+def test_non_final_json_body_is_scanned_as_a_whole_body(processor, context):
+    # Buffered mode with request trailers: one body message, end_of_stream false.
+    trailers = ep.ProcessingRequest(request_trailers=ep.HttpTrailers())
+    phases = [body("mail jane@example.com", final=False), trailers]
+    redacted, acknowledged = processor.Process(iter(phases), context)
+    common = redacted.request_body.response
+    assert common.status == ep.CommonResponse.CONTINUE_AND_REPLACE
+    assert b"jane@example.com" not in common.body_mutation.body
+    assert acknowledged.WhichOneof("response") == "request_trailers"
+
+
+@pytest.mark.parametrize(
+    ("pass_unparseable", "detail"), [(True, None), (False, "egress policy: unredactable")]
+)
+def test_final_unparseable_chunk_follows_pass_unparseable(context, pass_unparseable, detail):
+    processor = envoy.EgressProcessor(
+        policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable)
+    )
+    (response,) = processor.Process(iter([raw_body(b"RIFF....WAVE", final=True)]), context)
+    if detail is None:
+        assert response.request_body.response.status == ep.CommonResponse.CONTINUE
+    else:
+        assert response.immediate_response.details == detail
+
+
+def test_final_chunk_after_an_earlier_chunk_is_not_a_whole_body(context):
+    # A streamed body whose first chunk parses on its own: the remainder is a
+    # fragment, so pass_unparseable must not wave it through.
+    processor = envoy.EgressProcessor(policy=lambda: EgressPolicy(pass_unparseable=True))
+    phases = [body("hi", final=False), raw_body(b' "secret tail"}', final=True)]
+    first, rest = processor.Process(iter(phases), context)
+    assert first.request_body.response.status == ep.CommonResponse.CONTINUE
+    assert unbuffered(rest)

@@ -6,7 +6,16 @@ corpus image, so a deployment changes only its image and command.
 
 from __future__ import annotations
 
+from typing import Self
+
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+#: Logged at startup while the deprecated ``CORPUS_SCAN_GATE_FAIL_OPEN`` is set.
+FAIL_OPEN_DEPRECATION = (
+    "CORPUS_SCAN_GATE_FAIL_OPEN is deprecated and will be removed; "
+    "set CORPUS_SCAN_GATE_PASS_UNPARSEABLE instead"
+)
 
 
 class Settings(BaseSettings):
@@ -21,10 +30,13 @@ class Settings(BaseSettings):
     scan_gate_adapter: str = "envoy-ext-proc"
     scan_gate_port: int = 9002
     scan_gate_workers: int = 8
-    # Fail-open passes an unredactable body through unchanged (log-only, for a
-    # shadow rollout); the default fails closed: an unparseable or erroring body
-    # is blocked rather than leaked.
-    scan_gate_fail_open: bool = False
+    # Pass a body that is not a JSON object (multipart audio) through unscanned.
+    # Unset means false: such a body is refused. It never governs an error
+    # inside the policy, which is always refused. Read it as ``pass_unparseable``.
+    scan_gate_pass_unparseable: bool | None = None
+    # Deprecated alias for ``scan_gate_pass_unparseable``, honoured only when that
+    # is unset; the two set to different values is a startup error.
+    scan_gate_fail_open: bool | None = None
     # Comma-separated secret types that force an outright 403 block instead of
     # redaction. Kept small and high-confidence.
     scan_gate_block_types: str = "private_key"
@@ -40,6 +52,28 @@ class Settings(BaseSettings):
     # one message, so this must be at least the proxy's body buffer limit. grpc's
     # 4 MiB default refuses a chat body carrying an inline image.
     scan_gate_grpc_max_message_bytes: int = 50 * 1024 * 1024
+
+    @model_validator(mode="after")
+    def _alias_agrees(self) -> Self:
+        """Refuse to start when the deprecated alias contradicts its replacement."""
+        new, old = self.scan_gate_pass_unparseable, self.scan_gate_fail_open
+        if new is not None and old is not None and new != old:
+            raise ValueError(
+                f"CORPUS_SCAN_GATE_PASS_UNPARSEABLE={new} contradicts the deprecated "
+                f"CORPUS_SCAN_GATE_FAIL_OPEN={old}; unset CORPUS_SCAN_GATE_FAIL_OPEN"
+            )
+        return self
+
+    @property
+    def pass_unparseable(self) -> bool:
+        """Whether a body that is not a JSON object passes unscanned."""
+        if self.scan_gate_pass_unparseable is not None:
+            return self.scan_gate_pass_unparseable
+        return bool(self.scan_gate_fail_open)
+
+    def deprecations(self) -> list[str]:
+        """Warnings for deprecated settings in use, to log once at startup."""
+        return [FAIL_OPEN_DEPRECATION] if self.scan_gate_fail_open is not None else []
 
 
 settings = Settings()
