@@ -35,7 +35,7 @@ from .._ext_proc.envoy.config.core.v3 import base_pb2 as core
 from .._ext_proc.envoy.service.ext_proc.v3 import external_processor_pb2 as ep
 from .._ext_proc.envoy.service.ext_proc.v3 import external_processor_pb2_grpc as epg
 from .._ext_proc.envoy.type.v3 import http_status_pb2 as hs
-from ..config import settings
+from ..config import get_settings
 from .policy import EgressPolicy, Verdict, inspect, refusal
 
 log = logging.getLogger(__name__)
@@ -186,9 +186,9 @@ def server_options(limit: int | None = None) -> list[tuple[str, int]]:
 
     In Buffered mode the proxy sends the whole body as one message, and the
     rewritten body goes back as one too, so send and receive are raised together.
-    ``limit`` defaults to ``settings.scan_gate_grpc_max_message_bytes``.
+    ``limit`` defaults to the ``scan_gate_grpc_max_message_bytes`` setting.
     """
-    limit = limit or settings.scan_gate_grpc_max_message_bytes
+    limit = limit or get_settings().scan_gate_grpc_max_message_bytes
     return [
         ("grpc.max_receive_message_length", limit),
         ("grpc.max_send_message_length", limit),
@@ -197,6 +197,7 @@ def server_options(limit: int | None = None) -> list[tuple[str, int]]:
 
 def serve() -> None:  # pragma: no cover - binds a port and blocks on the reactor
     """Run the ext_proc gRPC server until terminated."""
+    settings = get_settings()
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=settings.scan_gate_workers),
         options=server_options(),

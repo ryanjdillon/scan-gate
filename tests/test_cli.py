@@ -8,8 +8,16 @@ import pytest
 from click.testing import CliRunner
 
 from scan_gate import adapters, cli
-from scan_gate.config import FAIL_OPEN_DEPRECATION, Settings
+from scan_gate.config import FAIL_OPEN_DEPRECATION, Settings, get_settings
 from scan_gate.telemetry import Telemetry
+
+
+@pytest.fixture(autouse=True)
+def fresh_settings():
+    """Load settings from each test's own environment, not an earlier test's."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -65,3 +73,23 @@ def test_deprecated_setting_is_warned_once_at_startup(serve, otel, monkeypatch, 
 def test_no_warning_without_deprecated_settings(serve, otel, caplog):
     cli.run(serve=serve, otel=otel, config=Settings())
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_conflicting_alias_exits_with_one_clear_line(runner, serve, otel, monkeypatch):
+    monkeypatch.setenv("CORPUS_SCAN_GATE_PASS_UNPARSEABLE", "true")
+    monkeypatch.setenv("CORPUS_SCAN_GATE_FAIL_OPEN", "false")
+    result = runner.invoke(cli.main, [], obj={"serve": serve, "otel": otel})
+    assert result.exit_code == 2
+    lines = result.output.strip().splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith("scan-gate: invalid configuration: ")
+    assert "contradicts the deprecated CORPUS_SCAN_GATE_FAIL_OPEN" in lines[0]
+    assert "Traceback" not in result.output
+    serve.assert_not_called()
+    otel.configure.assert_not_called()
+
+
+def test_injected_config_is_used_as_given(runner, serve, otel):
+    result = runner.invoke(cli.main, [], obj={"serve": serve, "otel": otel, "config": Settings()})
+    assert result.exit_code == 0, result.output
+    serve.assert_called_once_with()
