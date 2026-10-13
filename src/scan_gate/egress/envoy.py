@@ -87,12 +87,21 @@ def _immediate(verdict: Verdict) -> ep.ProcessingResponse:
 
 
 def to_response(verdict: Verdict) -> ep.ProcessingResponse:
-    """Map a policy verdict onto the request-body phase response."""
+    """Map a policy verdict onto the request-body phase response.
+
+    Only ``pass`` continues. An action this adapter does not know is refused
+    with a fixed reason rather than raised: an exception would end the stream
+    and leave a fail-closed proxy to answer a bare 5xx with nothing in the
+    egress log, the outcome :meth:`EgressProcessor._decide` exists to avoid.
+    """
+    if verdict.action == "pass":
+        return _continue_body()
     if verdict.action == "replace":
         return _replace_body(verdict.body)
     if verdict.action == "refuse":
         return _immediate(verdict)
-    return _continue_body()
+    log.error("egress: unknown verdict action %r; refusing", verdict.action)
+    return _immediate(refusal(403, "egress_policy", "request could not be inspected", "internal"))
 
 
 def client_id(headers: ep.HttpHeaders) -> str | None:

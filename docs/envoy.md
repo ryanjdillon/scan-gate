@@ -16,7 +16,8 @@ applies the [policy](policy.md) to the request body, and answers with one of:
 Every other phase is acknowledged unchanged. An error inside the policy is
 always refused (a 403 with the fixed reason `scan_error`; no setting passes it),
 never left to end the stream, so a fail-closed proxy does not return a bare 5xx
-with nothing in the log.
+with nothing in the log. A verdict the adapter does not recognise is refused the
+same way, with the fixed reason `internal`; only an explicit pass continues.
 
 ## Proxy settings it relies on
 
