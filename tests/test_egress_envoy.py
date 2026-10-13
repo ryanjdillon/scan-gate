@@ -7,6 +7,7 @@ injected.
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import create_autospec
 
 import grpc
@@ -202,6 +203,16 @@ def test_unavailable_policy_is_refused(context):
     (response,) = processor.Process(iter([body("hi")]), context)
     assert response.immediate_response.status.code == 403
     assert "bad config" not in response.immediate_response.details
+
+
+def test_unknown_action_is_refused(caplog):
+    with caplog.at_level(logging.ERROR):
+        response = envoy.to_response(Verdict("quarantine"))
+    immediate = response.immediate_response
+    assert immediate.status.code == 403
+    assert json.loads(immediate.body)["error"]["type"] == "egress_policy"
+    assert immediate.details == "egress policy: internal"
+    assert "quarantine" in caplog.text
 
 
 
