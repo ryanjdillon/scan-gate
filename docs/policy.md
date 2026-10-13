@@ -10,12 +10,14 @@ Only detection types and counts are logged, never a matched value or a body.
 ## Order
 
 For each body, in order: a body that is not a JSON object is refused (or passed,
-when failing open); a model in `CORPUS_SCAN_GATE_SKIP_MODELS` passes unscanned; a batch client's
+when `CORPUS_SCAN_GATE_PASS_UNPARSEABLE` is set and the body is complete; an
+incomplete one, a chunk of a larger body, is always refused with `unbuffered`); a model in `CORPUS_SCAN_GATE_SKIP_MODELS` passes unscanned; a batch client's
 oversized body gets a 413; otherwise every message's text is redacted, and a
 finding in `CORPUS_SCAN_GATE_BLOCK_TYPES` gets a 403. Text is read from chat message content
 (including nested tool results and tool-call arguments), Anthropic `system`,
 embeddings `input` and completions `prompt`. An error inside the policy is
-refused (or passed, when failing open) rather than left to the proxy. Refusals carry an OpenAI-style JSON error.
+always refused (`scan_error`), never passed and never left to the proxy, whatever
+the settings. Refusals carry an OpenAI-style JSON error.
 `SKIP_MODELS` takes exact names, not patterns, so a typo can only make the gate
 scan more. Skipping trusts the body's `model` field, so it is sound only where the
 gateway routes on that same field: a request naming a local model must not be
