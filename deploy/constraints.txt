@@ -177,7 +177,9 @@ srsly==2.5.4
 thinc==8.3.13
     # via spacy
 tldextract==5.4.0
-    # via presidio-analyzer
+    # via
+    #   corpus-detect
+    #   presidio-analyzer
 tqdm==4.70.1
     # via spacy
 typer==0.27.3
