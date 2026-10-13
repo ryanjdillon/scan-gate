@@ -205,6 +205,28 @@ def test_unavailable_policy_is_refused(context):
     assert "bad config" not in response.immediate_response.details
 
 
+def test_deeply_nested_body_is_refused_as_a_scan_error(processor, context):
+    # The real parser overflows the recursion limit on this; nothing is mocked.
+    (response,) = processor.Process(iter([raw_body(b"[" * 200_000, final=True)]), context)
+    immediate = response.immediate_response
+    assert immediate.status.code == 403
+    assert json.loads(immediate.body)["error"]["type"] == "egress_policy"
+    assert immediate.details == "egress policy: scan_error"
+
+
+def test_inspection_error_logs_only_its_type(context, caplog):
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    detector = create_autospec(envoy.inspect, side_effect=KeyError(f"leaked {secret}"))
+    processor = envoy.EgressProcessor(policy=EgressPolicy, inspect=detector)
+    with caplog.at_level(logging.DEBUG):
+        processor.Process(iter([body(f"mail {secret} please")]), context).__next__()
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert "KeyError" in logged
+    for leak in (secret, "leaked", "mail", "please"):
+        assert leak not in logged
+    assert all(r.exc_info is None for r in caplog.records)
+
+
 def test_unknown_action_is_refused(caplog):
     with caplog.at_level(logging.ERROR):
         response = envoy.to_response(Verdict("quarantine"))
