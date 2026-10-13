@@ -8,17 +8,23 @@ from collections.abc import Callable
 import click
 
 from . import adapters
+from .config import Settings, settings
 from .telemetry import Telemetry, telemetry
 
 #: The OTel service name when ``OTEL_SERVICE_NAME`` is unset.
 SERVICE_NAME = "corpus-scan-gate"
 
+log = logging.getLogger(__name__)
+
 
 def run(
     serve: Callable[[], None] = adapters.serve,
     otel: Telemetry = telemetry,
+    config: Settings = settings,
 ) -> None:
-    """Configure telemetry, serve until terminated, then flush telemetry."""
+    """Warn of deprecated settings, configure telemetry, serve, then flush telemetry."""
+    for message in config.deprecations():
+        log.warning(message)
     otel.configure(SERVICE_NAME)
     try:
         serve()

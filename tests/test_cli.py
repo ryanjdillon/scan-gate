@@ -8,6 +8,7 @@ import pytest
 from click.testing import CliRunner
 
 from scan_gate import adapters, cli
+from scan_gate.config import FAIL_OPEN_DEPRECATION, Settings
 from scan_gate.telemetry import Telemetry
 
 
@@ -52,3 +53,15 @@ def test_version_is_the_distribution_version(runner):
     result = runner.invoke(cli.main, ["--version"])
     assert result.exit_code == 0
     assert result.output.startswith("scan-gate, version ")
+
+
+def test_deprecated_setting_is_warned_once_at_startup(serve, otel, monkeypatch, caplog):
+    monkeypatch.setenv("CORPUS_SCAN_GATE_FAIL_OPEN", "true")
+    cli.run(serve=serve, otel=otel, config=Settings())
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert [r.getMessage() for r in warnings] == [FAIL_OPEN_DEPRECATION]
+
+
+def test_no_warning_without_deprecated_settings(serve, otel, caplog):
+    cli.run(serve=serve, otel=otel, config=Settings())
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]

@@ -8,8 +8,11 @@ nothing here knows about Envoy, gRPC, or HTTP framing.
 
 The policy, in order:
 
-1. A body that is not a JSON object cannot be inspected. ``fail_open`` passes it
-   through (multipart audio uploads take this path); otherwise it is refused.
+1. A body that is not a JSON object cannot be inspected. ``pass_unparseable``
+   passes it through (multipart audio uploads take this path); otherwise it is
+   refused. A body the gateway marks as not ``complete`` (a chunk of a larger
+   body) is always refused instead: a fragment of JSON is unparseable, so
+   passing it would send a streamed request out unscanned.
 2. A request for a model in ``skip_models`` passes unscanned: it is served
    locally and never leaves the network. The list is exact names, so a typo can
    only make the gate scan more.
@@ -18,6 +21,9 @@ The policy, in order:
    sending; this refuses an uncapped one (413) before it reaches a provider.
 4. Every message's text is redacted. A finding in ``block_types`` refuses the
    request (403) instead.
+
+An exception raised while inspecting is not a step of the policy: the adapter
+always refuses it, whatever ``pass_unparseable`` says.
 
 Only detection *types and counts* are logged, never a matched value or a body.
 """
@@ -45,7 +51,7 @@ def _names(csv: str) -> frozenset[str]:
 class EgressPolicy:
     """The tunable parts of the policy; see the module docstring for the order."""
 
-    fail_open: bool = False
+    pass_unparseable: bool = False
     block_types: frozenset[str] = frozenset({"private_key"})
     skip_models: frozenset[str] = field(default_factory=frozenset)
     batch_clients: frozenset[str] = field(default_factory=frozenset)
@@ -56,7 +62,7 @@ class EgressPolicy:
         """Build the policy from ``CORPUS_SCAN_GATE_*`` settings (default: the loaded ones)."""
         config = config or settings
         return cls(
-            fail_open=config.scan_gate_fail_open,
+            pass_unparseable=config.pass_unparseable,
             block_types=_names(config.scan_gate_block_types),
             skip_models=_names(config.scan_gate_skip_models),
             batch_clients=_names(config.scan_gate_batch_clients),
@@ -168,8 +174,11 @@ def redact_payload(data: dict[str, Any]) -> list[Span]:
     return findings
 
 
-def _unparseable(policy: EgressPolicy, reason: str) -> Verdict:
-    if policy.fail_open:
+def _unparseable(policy: EgressPolicy, reason: str, *, complete: bool) -> Verdict:
+    if not complete:
+        log.warning("egress: refusing an uninspectable partial body (%s)", reason)
+        return refusal(403, "egress_policy", "request body was not buffered", "unbuffered")
+    if policy.pass_unparseable:
         # Routine for multipart audio uploads, so not a warning.
         log.info("egress: passing an uninspectable body through (%s)", reason)
         return PASS
@@ -177,16 +186,23 @@ def _unparseable(policy: EgressPolicy, reason: str) -> Verdict:
     return refusal(403, "egress_policy", "request body could not be inspected", "unredactable")
 
 
-def inspect(body: bytes, client_id: str | None = None, *, policy: EgressPolicy) -> Verdict:
-    """Decide what may leave for one request body; see the module docstring."""
+def inspect(
+    body: bytes, client_id: str | None = None, *, policy: EgressPolicy, complete: bool = True
+) -> Verdict:
+    """Decide what may leave for one request body; see the module docstring.
+
+    ``complete`` is false when ``body`` may be only part of the request body. A
+    parseable part is still scanned as a whole body; only the unparseable path
+    differs, refusing it whatever ``pass_unparseable`` says.
+    """
     if not body:
         return PASS
     try:
         data = json.loads(body)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        return _unparseable(policy, str(exc))
+        return _unparseable(policy, str(exc), complete=complete)
     if not isinstance(data, dict):
-        return _unparseable(policy, "request body is not a JSON object")
+        return _unparseable(policy, "request body is not a JSON object", complete=complete)
 
     model = data.get("model")
     if isinstance(model, str) and model in policy.skip_models:

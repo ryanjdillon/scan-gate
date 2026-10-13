@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from scan_gate.config import Settings
 from scan_gate.egress.policy import EgressPolicy, inspect, redact_payload
 
 FAKE_PRIVATE_KEY = (
@@ -93,14 +94,47 @@ def test_without_block_types_a_private_key_is_redacted_instead():
 
 
 @pytest.mark.parametrize("body", [b"not json at all", b"[1, 2, 3]"])
-def test_uninspectable_body_is_refused_when_failing_closed(body):
-    verdict = inspect(body, policy=EgressPolicy(fail_open=False))
+def test_uninspectable_body_is_refused_by_default(body):
+    verdict = inspect(body, policy=EgressPolicy())
+    assert (verdict.action, verdict.status, verdict.detail) == ("refuse", 403, "unredactable")
+
+
+@pytest.mark.parametrize("body", [b"--boundary\r\n...", b"\xff\xfe\x00audio", b"[1, 2, 3]"])
+def test_uninspectable_body_passes_when_pass_unparseable(body):
+    # Multipart audio uploads take this path.
+    assert inspect(body, policy=EgressPolicy(pass_unparseable=True)).action == "pass"
+
+
+@pytest.mark.parametrize("pass_unparseable", [False, True])
+def test_incomplete_uninspectable_body_is_refused_unbuffered(pass_unparseable):
+    policy = EgressPolicy(pass_unparseable=pass_unparseable)
+    verdict = inspect(b'{"model": "m", "mess', policy=policy, complete=False)
+    assert (verdict.action, verdict.status, verdict.detail) == ("refuse", 403, "unbuffered")
+
+
+def test_incomplete_json_body_is_scanned_as_usual():
+    verdict = inspect(chat("mail jane@example.com"), policy=EgressPolicy(), complete=False)
+    assert verdict.action == "replace" and b"jane@example.com" not in verdict.body
+
+
+def test_pass_unparseable_does_not_skip_scanning_json():
+    verdict = inspect(chat(FAKE_PRIVATE_KEY), policy=EgressPolicy(pass_unparseable=True))
     assert (verdict.action, verdict.status) == ("refuse", 403)
 
 
-def test_uninspectable_body_passes_when_failing_open():
-    # Multipart audio uploads take this path when the gate fails open.
-    assert inspect(b"--boundary\r\n...", policy=EgressPolicy(fail_open=True)).action == "pass"
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({}, False),
+        ({"CORPUS_SCAN_GATE_PASS_UNPARSEABLE": "true"}, True),
+        ({"CORPUS_SCAN_GATE_FAIL_OPEN": "true"}, True),
+        ({"CORPUS_SCAN_GATE_FAIL_OPEN": "false"}, False),
+    ],
+)
+def test_policy_reads_pass_unparseable_or_its_alias(monkeypatch, env, expected):
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    assert EgressPolicy.from_settings(Settings()).pass_unparseable is expected
 
 
 def test_empty_body_passes(policy):
