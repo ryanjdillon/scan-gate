@@ -1,0 +1,65 @@
+[project]
+name = "scan-gate"
+version = "0.1.0"
+description = "Fail-closed egress redactor for LLM request bodies, behind an AI gateway"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MPL-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    # The deterministic PII/secret detectors and redaction, from the corpus repo,
+    # pinned to the commit of a corpus release tag, so a moved tag cannot change
+    # what is installed. Bump the SHA (and the tag comment) to take detector changes.
+    # corpus v0.5.27
+    "corpus-detect @ git+https://github.com/ryanjdillon/corpus@658f55ac94e04ce0cbe87c1c1b97ffbe13a2e8a6#subdirectory=packages/detect",
+    # ext_proc server. grpcio is the runtime; protobuf is the well-known-types
+    # runtime the vendored envoy/xds ext_proc stubs (scan_gate/_ext_proc/) were
+    # generated against. Bounds track the gencode: grpcio>=1.74, protobuf 6.31+
+    # (and <8 for otel).
+    "grpcio>=1.74,<2",
+    "protobuf>=6.31,<8",
+    # OpenTelemetry: traces + metrics over OTLP to the cluster collector.
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+    "pydantic-settings>=2.6",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.3",
+    "coverage>=7.6",
+]
+dev = [
+    # Pinned to match CI so `just check` catches exactly what CI does.
+    "ruff==0.16.4",
+]
+
+[project.scripts]
+scan-gate = "scan_gate.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scan_gate"]
+
+# The corpus-detect dependency is a direct (git) reference.
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Vendored, protoc-generated ext_proc stubs — not hand-maintained source.
+extend-exclude = ["src/scan_gate/_ext_proc"]
+
+[tool.coverage.run]
+source = ["scan_gate"]
+# The vendored generated stubs are executed on import but are not our code.
+omit = ["src/scan_gate/_ext_proc/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
