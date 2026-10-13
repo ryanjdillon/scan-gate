@@ -21,11 +21,13 @@ It is stateless: it needs no database, volume or provider key, only the
 variables below.
 
 ```sh
-docker run --rm -p 9002:9002 -e CORPUS_SCAN_GATE_FAIL_OPEN=false ghcr.io/ryanjdillon/scan-gate:v0.1.0
+docker run --rm -p 9002:9002 ghcr.io/ryanjdillon/scan-gate:v0.2.0
 ```
 
 Configure the gateway's ext_proc filter to send request headers and the request
-body in `Buffered` mode; see [the Envoy adapter](docs/envoy.md). Readiness is a
+body in `Buffered` mode (request trailers are supported). An unparseable body
+that is not the final chunk is always refused (`unbuffered`); see
+[the Envoy adapter](docs/envoy.md). Readiness is a
 TCP probe on the gRPC port: allow the detectors' cold start (Presidio loads in
 seconds).
 
@@ -37,7 +39,8 @@ seconds).
 | `CORPUS_HOST` | `0.0.0.0` |
 | `CORPUS_SCAN_GATE_PORT` | `9002` |
 | `CORPUS_SCAN_GATE_WORKERS` | `8` |
-| `CORPUS_SCAN_GATE_FAIL_OPEN` | `false` |
+| `CORPUS_SCAN_GATE_PASS_UNPARSEABLE` | `false` |
+| `CORPUS_SCAN_GATE_FAIL_OPEN` | deprecated alias of `PASS_UNPARSEABLE` |
 | `CORPUS_SCAN_GATE_BLOCK_TYPES` | `private_key` |
 | `CORPUS_SCAN_GATE_SKIP_MODELS` | none |
 | `CORPUS_SCAN_GATE_BATCH_CLIENTS` | none |
@@ -45,6 +48,10 @@ seconds).
 | `CORPUS_SCAN_GATE_GRPC_MAX_MESSAGE_BYTES` | 50 MiB |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset: no telemetry |
 | `OTEL_SERVICE_NAME` | `corpus-scan-gate` |
+
+Booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off` (and
+`t`/`f`, `y`/`n`), in any case; any other value fails at startup. A detector
+error always refuses the request; no setting passes it.
 
 The names keep the `CORPUS_` prefix from when the gate shipped in the corpus
 image. What each does: [Configuration](docs/configuration.md); what happens to a

@@ -14,15 +14,24 @@ applies the [policy](policy.md) to the request body, and answers with one of:
   `content-type: application/json`; the proxy answers the client and stops.
 
 Every other phase is acknowledged unchanged. An error inside the policy is
-answered (refused, or passed when failing open), never left to end the stream,
-so a fail-closed proxy does not return a bare 5xx with nothing in the log.
+always refused (a 403 with the fixed reason `scan_error`; no setting passes it),
+never left to end the stream, so a fail-closed proxy does not return a bare 5xx
+with nothing in the log.
 
 ## Proxy settings it relies on
 
-The envoy-ext-proc adapter expects the request body in `Buffered` processing
-mode, where the proxy sends the whole body as one gRPC message, so
+The envoy-ext-proc adapter expects `processingMode.request.body: Buffered`,
+where the proxy sends the whole body as one gRPC message, so
 `CORPUS_SCAN_GATE_GRPC_MAX_MESSAGE_BYTES` must be at least the proxy's body
-buffer limit. Request headers must be sent too (the default), so the adapter sees
+buffer limit. Request trailers are supported: Buffered mode then sends the body
+with `end_of_stream` false and the trailers after it, and that body is scanned
+and redacted as usual. An unparseable body that is not the final chunk (its
+`end_of_stream` is false, or an earlier body chunk came before it) is always
+refused with a 403 and the fixed reason `unbuffered`, whatever
+`PASS_UNPARSEABLE` says: under `Streamed` or `BufferedPartial` a chunk of JSON
+does not parse, and passing it would send the request out unscanned. So
+`PASS_UNPARSEABLE` passes only a whole body, and a multipart upload carrying
+request trailers is refused. Request headers must be sent too (the default), so the adapter sees
 `x-client-id`. Only the `text` of each message and content part is redacted;
 image and audio parts pass through byte-identical.
 
