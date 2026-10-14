@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import cache
 from typing import Self
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Logged at startup while the deprecated ``CORPUS_SCAN_GATE_FAIL_OPEN`` is set.
@@ -39,8 +39,11 @@ class Settings(BaseSettings):
     # is unset; the two set to different values is a startup error.
     scan_gate_fail_open: bool | None = None
     # Comma-separated secret types that force an outright 403 block instead of
-    # redaction. Kept small and high-confidence.
-    scan_gate_block_types: str = "private_key"
+    # redaction. An entry ending in ``*`` matches every type with that prefix, so
+    # ``secret:betterleaks:*`` covers every Betterleaks rule without listing them.
+    # A ``*`` anywhere else, a bare ``*`` (which would block all PII too) and an
+    # empty entry are refused at startup.
+    scan_gate_block_types: str = "private_key,secret:betterleaks:*"
     # Comma-separated model names passed unscanned because they are served
     # locally. Exact names only, so a typo can only make the gate scan more.
     scan_gate_skip_models: str = ""
@@ -68,6 +71,27 @@ class Settings(BaseSettings):
     # The sidecar's SECRETSCAN_MAX_BYTES: a request body over it is refused (413)
     # without being sent. Keep the two equal.
     scan_gate_secretscan_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
+
+    @field_validator("scan_gate_block_types")
+    @classmethod
+    def _block_types_are_well_formed(cls, value: str) -> str:
+        """Refuse block types that would block everything or silently match nothing."""
+        if not value.strip():
+            return value
+        for entry in (e.strip() for e in value.split(",")):
+            if not entry:
+                raise ValueError("CORPUS_SCAN_GATE_BLOCK_TYPES has an empty entry")
+            if entry == "*":
+                raise ValueError(
+                    "CORPUS_SCAN_GATE_BLOCK_TYPES may not be a bare '*': it would block every "
+                    "finding, PII included"
+                )
+            if "*" in entry[:-1]:
+                raise ValueError(
+                    f"CORPUS_SCAN_GATE_BLOCK_TYPES entry {entry!r} has a '*' before its end; "
+                    "'*' is only a trailing prefix match"
+                )
+        return value
 
     @model_validator(mode="after")
     def _alias_agrees(self) -> Self:

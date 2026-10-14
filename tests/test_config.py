@@ -14,7 +14,7 @@ def test_defaults_match_the_corpus_scan_gate():
     assert loaded.scan_gate_adapter == "envoy-ext-proc"
     assert loaded.pass_unparseable is False
     assert loaded.deprecations() == []
-    assert loaded.scan_gate_block_types == "private_key"
+    assert loaded.scan_gate_block_types == "private_key,secret:betterleaks:*"
     assert loaded.scan_gate_batch_max_bytes == 65536
     assert loaded.scan_gate_grpc_max_message_bytes == 50 * 1024 * 1024
 
@@ -84,3 +84,30 @@ def test_unrecognised_boolean_refuses_to_start(monkeypatch):
     monkeypatch.setenv("CORPUS_SCAN_GATE_PASS_UNPARSEABLE", "maybe")
     with pytest.raises(ValidationError):
         Settings()
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("*", "bare '*'"),
+        ("private_key,*", "bare '*'"),
+        ("secret:*:github-pat", "'*' before its end"),
+        ("*secret", "'*' before its end"),
+        ("secret:**", "'*' before its end"),
+        ("private_key,,secret:betterleaks:*", "empty entry"),
+        ("private_key,", "empty entry"),
+        ("private_key, ,email", "empty entry"),
+    ],
+)
+def test_malformed_block_types_refuse_to_start(monkeypatch, value, reason):
+    monkeypatch.setenv("CORPUS_SCAN_GATE_BLOCK_TYPES", value)
+    with pytest.raises(ValidationError, match=reason):
+        Settings()
+
+
+@pytest.mark.parametrize(
+    "value", ["", "private_key", " private_key , secret:betterleaks:* ", "secret:*"]
+)
+def test_well_formed_block_types_are_accepted(monkeypatch, value):
+    monkeypatch.setenv("CORPUS_SCAN_GATE_BLOCK_TYPES", value)
+    assert Settings().scan_gate_block_types == value

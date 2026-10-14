@@ -89,6 +89,24 @@ def test_conflicting_alias_exits_with_one_clear_line(runner, serve, otel, monkey
     otel.configure.assert_not_called()
 
 
+def test_a_bare_star_block_type_exits_with_one_clear_line(runner, serve, otel, monkeypatch):
+    monkeypatch.setenv("CORPUS_SCAN_GATE_BLOCK_TYPES", "private_key,*")
+    result = runner.invoke(cli.main, [], obj={"serve": serve, "otel": otel})
+    assert result.exit_code == 2
+    (line,) = result.output.strip().splitlines()
+    assert line.startswith("scan-gate: invalid configuration: ")
+    assert "may not be a bare '*'" in line
+    serve.assert_not_called()
+
+
+def test_unblocked_betterleaks_findings_are_warned_at_startup(serve, otel, monkeypatch, caplog):
+    monkeypatch.setenv("CORPUS_SCAN_GATE_BLOCK_TYPES", "private_key")
+    cli.run(serve=serve, otel=otel, config=Settings())
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert "will be redacted, not blocked" in warning
+    serve.assert_called_once_with()
+
+
 def test_injected_config_is_used_as_given(runner, serve, otel):
     result = runner.invoke(cli.main, [], obj={"serve": serve, "otel": otel, "config": Settings()})
     assert result.exit_code == 0, result.output

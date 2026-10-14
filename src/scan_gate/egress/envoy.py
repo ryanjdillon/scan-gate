@@ -37,6 +37,7 @@ from .._ext_proc.envoy.service.ext_proc.v3 import external_processor_pb2_grpc as
 from .._ext_proc.envoy.type.v3 import http_status_pb2 as hs
 from ..config import get_settings
 from .policy import EgressPolicy, Verdict, inspect, refusal
+from .secretscan import SecretScanner, secret_scanner
 
 log = logging.getLogger(__name__)
 
@@ -118,13 +119,20 @@ def _scan_error() -> Verdict:
 
 
 class EgressProcessor(epg.ExternalProcessorServicer):
-    """ext_proc servicer applying the egress policy to the request body."""
+    """ext_proc servicer applying the egress policy to the request body.
+
+    ``scanner`` is the secret-scan sidecar client, built once by :func:`serve`
+    and shared by every stream (it holds no connection); ``None`` runs the
+    policy without it.
+    """
 
     def __init__(
         self,
+        scanner: SecretScanner | None,
         policy: Callable[[], EgressPolicy] = EgressPolicy.from_settings,
         inspect: Callable[..., Verdict] = inspect,
     ) -> None:
+        self._scanner = scanner
         self._policy = policy
         self._inspect = inspect
 
@@ -143,7 +151,9 @@ class EgressProcessor(epg.ExternalProcessorServicer):
             log.warning("egress: policy unavailable (%s); refusing", type(exc).__name__)
             return _scan_error()
         try:
-            return self._inspect(body, caller, policy=policy, complete=complete)
+            return self._inspect(
+                body, caller, policy=policy, scanner=self._scanner, complete=complete
+            )
         except Exception as exc:  # noqa: BLE001 - any failure must become an answer
             log.warning("egress: policy raised %s; refusing", type(exc).__name__)
             return _scan_error()
@@ -202,7 +212,7 @@ def serve() -> None:  # pragma: no cover - binds a port and blocks on the reacto
         futures.ThreadPoolExecutor(max_workers=settings.scan_gate_workers),
         options=server_options(),
     )
-    epg.add_ExternalProcessorServicer_to_server(EgressProcessor(), server)
+    epg.add_ExternalProcessorServicer_to_server(EgressProcessor(secret_scanner(settings)), server)
     server.add_insecure_port(f"{settings.host}:{settings.scan_gate_port}")
     log.info(
         "scan-gate (envoy ext_proc) listening on %s:%s", settings.host, settings.scan_gate_port

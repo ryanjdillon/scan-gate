@@ -19,11 +19,15 @@ The policy, in order:
 3. A batch client (``batch_clients``) may not send a body over
    ``batch_max_bytes`` to a scanned model. Batch jobs must cap their input before
    sending; this refuses an uncapped one (413) before it reaches a provider.
-4. Every message's text is redacted. A finding in ``block_types`` refuses the
-   request (403) instead.
+4. Every message's text is redacted, by corpus-detect together with the spans
+   the Betterleaks sidecar finds (one sidecar call per body). A finding whose
+   type is in ``block_types`` (an entry ending in ``*`` matches a prefix)
+   refuses the request (403) instead. A body whose text is over the sidecar's
+   size limit is refused (413, ``too_large_to_scan``) without being sent.
 
 An exception raised while inspecting is not a step of the policy: the adapter
-always refuses it, whatever ``pass_unparseable`` says.
+always refuses it, whatever ``pass_unparseable`` says. Any sidecar failure is
+such an exception, so a body the sidecar did not fully scan never passes.
 
 Only detection *types and counts* are logged, never a matched value or a body.
 """
@@ -32,13 +36,14 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from typing import Any
 
 from corpus_detect import Span, redact
 
 from ..config import Settings, get_settings
+from .secretscan import TYPE_PREFIX, SecretScanner, SecretScanTooLarge
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +57,7 @@ class EgressPolicy:
     """The tunable parts of the policy; see the module docstring for the order."""
 
     pass_unparseable: bool = False
-    block_types: frozenset[str] = frozenset({"private_key"})
+    block_types: frozenset[str] = frozenset({"private_key", "secret:betterleaks:*"})
     skip_models: frozenset[str] = field(default_factory=frozenset)
     batch_clients: frozenset[str] = field(default_factory=frozenset)
     batch_max_bytes: int = 65536
@@ -67,6 +72,41 @@ class EgressPolicy:
             skip_models=_names(config.scan_gate_skip_models),
             batch_clients=_names(config.scan_gate_batch_clients),
             batch_max_bytes=config.scan_gate_batch_max_bytes,
+        )
+
+    def blocks(self, entity_type: str) -> bool:
+        """Whether a finding of ``entity_type`` refuses the request.
+
+        A ``block_types`` entry matches a type exactly, or, ending in ``*``,
+        every type starting with what comes before it.
+        """
+        return any(
+            entity_type.startswith(entry[:-1]) if entry.endswith("*") else entity_type == entry
+            for entry in self.block_types
+        )
+
+    def blocks_every(self, prefix: str) -> bool:
+        """Whether every type starting with ``prefix`` is blocked: some entry
+        ending in ``*`` matches a prefix of it."""
+        return any(
+            entry.endswith("*") and prefix.startswith(entry[:-1]) for entry in self.block_types
+        )
+
+
+def warn_if_secrets_unblocked(config: Settings) -> None:
+    """Log once at startup when the sidecar is on but its findings are not blocked.
+
+    ``block_types`` replaces its default when set, so a deployment can drop
+    ``secret:betterleaks:*`` without meaning to; its secrets are then redacted
+    and the request still leaves.
+    """
+    if config.scan_gate_secretscan_enabled and not EgressPolicy.from_settings(
+        config
+    ).blocks_every(TYPE_PREFIX):
+        log.warning(
+            "egress: CORPUS_SCAN_GATE_BLOCK_TYPES does not cover %s*; Betterleaks findings "
+            "will be redacted, not blocked",
+            TYPE_PREFIX,
         )
 
 
@@ -94,55 +134,96 @@ def refusal(status: int, error_type: str, message: str, detail: str) -> Verdict:
     return Verdict("refuse", status=status, body=body, detail=detail)
 
 
-def _summary(findings: Iterable[Span]) -> dict[str, int]:
-    """Reduce spans to a value-free ``{type: count}`` tally for logging/responses."""
-    counts: dict[str, int] = {}
-    for span in findings:
-        counts[span.entity_type] = counts.get(span.entity_type, 0) + 1
-    return counts
+#: Joins a request's texts into the one text sent to the secret scanner. A
+#: newline ends a token for every Betterleaks rule, so a secret inside one field
+#: is matched as it would be alone.
+SEPARATOR = "\n\n"
+
+#: Where a text sits in the parsed body: its container and its key or index.
+_Slot = tuple[Any, Any]
 
 
-def _redact_field(container: dict[str, Any], key: str, findings: list[Span]) -> None:
-    """Redact ``container[key]`` in place: a string, a list of strings, or parts."""
+def _field_slots(container: dict[str, Any], key: str, slots: list[_Slot]) -> None:
+    """Collect ``container[key]``'s text: a string, a list of strings, or parts."""
     value = container.get(key)
     if isinstance(value, str):
-        result = redact(value)
-        container[key] = result.text
-        findings.extend(result.findings)
+        slots.append((container, key))
     elif isinstance(value, list):
         for i, item in enumerate(value):
             if isinstance(item, str):
-                result = redact(item)
-                value[i] = result.text
-                findings.extend(result.findings)
+                slots.append((value, i))
             elif isinstance(item, dict):
-                _redact_part(item, findings)
+                _part_slots(item, slots)
 
 
-def _redact_values(obj: Any, findings: list[Span]) -> Any:
-    """Return *obj* with every string inside it redacted (dicts and lists walked)."""
-    if isinstance(obj, str):
-        result = redact(obj)
-        findings.extend(result.findings)
-        return result.text
-    if isinstance(obj, dict):
-        return {k: _redact_values(v, findings) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_redact_values(v, findings) for v in obj]
-    return obj
+def _value_slots(obj: dict[str, Any] | list[Any], slots: list[_Slot]) -> None:
+    """Collect every string inside *obj*, walking dicts and lists."""
+    items = obj.items() if isinstance(obj, dict) else enumerate(obj)
+    for key, value in items:
+        if isinstance(value, str):
+            slots.append((obj, key))
+        elif isinstance(value, (dict, list)):
+            _value_slots(value, slots)
 
 
-def _redact_part(part: dict[str, Any], findings: list[Span]) -> None:
-    """Redact one structured content part: its ``text``, nested ``content`` (an
-    Anthropic ``tool_result`` carries its own string or part list), and a
+def _part_slots(part: dict[str, Any], slots: list[_Slot]) -> None:
+    """Collect one structured content part's text: its ``text``, nested ``content``
+    (an Anthropic ``tool_result`` carries its own string or part list), and a
     ``tool_use`` part's ``input`` arguments."""
-    _redact_field(part, "text", findings)
-    _redact_field(part, "content", findings)
+    _field_slots(part, "text", slots)
+    _field_slots(part, "content", slots)
     if isinstance(part.get("input"), dict):
-        part["input"] = _redact_values(part["input"], findings)
+        _value_slots(part["input"], slots)
 
 
-def redact_payload(data: dict[str, Any]) -> list[Span]:
+def _text_slots(data: dict[str, Any]) -> list[_Slot]:
+    """Every text field of a model request body; see :func:`redact_payload`."""
+    slots: list[_Slot] = []
+    for key in ("system", "input", "prompt"):
+        _field_slots(data, key, slots)
+    messages = data.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            _field_slots(message, "content", slots)
+            calls = message.get("tool_calls")
+            for call in calls if isinstance(calls, list) else []:
+                function = call.get("function") if isinstance(call, dict) else None
+                if isinstance(function, dict):
+                    _field_slots(function, "arguments", slots)
+    return slots
+
+
+def scan_texts(scanner: SecretScanner | None, texts: list[str]) -> list[list[Span]]:
+    """The scanner's secret spans for each of ``texts``, from one scanner call.
+
+    The texts are joined with :data:`SEPARATOR` and scanned once, and each span
+    is mapped back to offsets in the texts it covers. A span reaching across a
+    separator is clipped to each text it touches (masking a little more, never
+    less), and a part of it lying only on the separator is dropped. No call is
+    made without a scanner or without any text.
+    """
+    per_text: list[list[Span]] = [[] for _ in texts]
+    if scanner is None or not any(texts):
+        return per_text
+    starts: list[int] = []
+    offset = 0
+    for text in texts:
+        starts.append(offset)
+        offset += len(text) + len(SEPARATOR)
+    for span in scanner.spans(SEPARATOR.join(texts)):
+        i = bisect_right(starts, span.start) - 1
+        while i < len(texts) and starts[i] < span.end:
+            lo = max(span.start, starts[i]) - starts[i]
+            hi = min(span.end, starts[i] + len(texts[i])) - starts[i]
+            if lo < hi:
+                per_text[i].append(Span(lo, hi, span.entity_type, span.category))
+            i += 1
+    return per_text
+
+
+def redact_payload(data: dict[str, Any], scanner: SecretScanner | None) -> dict[str, int]:
     """Redact every text field of a model request body in place.
 
     Covers the OpenAI and Anthropic shapes that carry user text:
@@ -154,24 +235,28 @@ def redact_payload(data: dict[str, Any]) -> list[Span]:
     - embeddings ``input`` and legacy completions ``prompt`` (a string or a list
       of strings; token-id arrays carry no text).
 
-    Image and audio parts are left untouched. Returns the applied spans.
+    Each text is redacted by corpus-detect together with the ``scanner``'s
+    spans for it (one scanner call for the whole body; see :func:`scan_texts`).
+    Image and audio parts are left untouched. Returns a value-free
+    ``{type: count}`` tally of ``RedactResult.counts`` (each matched span
+    counted once), plus every sidecar span type those counts leave out.
     """
-    findings: list[Span] = []
-    for key in ("system", "input", "prompt"):
-        _redact_field(data, key, findings)
-
-    messages = data.get("messages")
-    if isinstance(messages, list):
-        for message in messages:
-            if not isinstance(message, dict):
-                continue
-            _redact_field(message, "content", findings)
-            calls = message.get("tool_calls")
-            for call in calls if isinstance(calls, list) else []:
-                function = call.get("function") if isinstance(call, dict) else None
-                if isinstance(function, dict):
-                    _redact_field(function, "arguments", findings)
-    return findings
+    slots = _text_slots(data)
+    texts = [container[key] for container, key in slots]
+    counts: dict[str, int] = {}
+    for (container, key), text, extra in zip(slots, texts, scan_texts(scanner, texts), strict=True):
+        result = redact(text, extra_spans=extra)
+        container[key] = result.text
+        for entity_type, n in result.counts.items():
+            counts[entity_type] = counts.get(entity_type, 0) + n
+        # A sidecar span wholly covered by a detected one (the same token found
+        # by both) is masked under the other's type, so ``redact`` does not count
+        # it. Count it anyway: a block on the sidecar's types must not be
+        # sidestepped by a coincident corpus-detect match.
+        for span in extra:
+            if span.entity_type not in result.counts:
+                counts[span.entity_type] = counts.get(span.entity_type, 0) + 1
+    return counts
 
 
 def _unparseable(policy: EgressPolicy, reason: str, *, complete: bool) -> Verdict:
@@ -187,10 +272,17 @@ def _unparseable(policy: EgressPolicy, reason: str, *, complete: bool) -> Verdic
 
 
 def inspect(
-    body: bytes, client_id: str | None = None, *, policy: EgressPolicy, complete: bool = True
+    body: bytes,
+    client_id: str | None = None,
+    *,
+    policy: EgressPolicy,
+    scanner: SecretScanner | None,
+    complete: bool = True,
 ) -> Verdict:
     """Decide what may leave for one request body; see the module docstring.
 
+    ``scanner`` is the secret-scan sidecar client, or ``None`` when it is
+    disabled; any error it raises propagates, for the adapter to refuse.
     ``complete`` is false when ``body`` may be only part of the request body. A
     parseable part is still scanned as a whole body; only the unparseable path
     differs, refusing it whatever ``pass_unparseable`` says.
@@ -218,9 +310,17 @@ def inspect(
             f"batch body {len(body)} bytes",
         )
 
-    findings = redact_payload(data)
-    counts = _summary(findings)
-    blocked = counts.keys() & policy.block_types
+    try:
+        counts = redact_payload(data, scanner)
+    except SecretScanTooLarge:
+        log.warning("egress: refusing a body whose text is too large to scan")
+        return refusal(
+            413,
+            "request_too_large",
+            "request text is too large to scan for secrets",
+            "too_large_to_scan",
+        )
+    blocked = {t for t in counts if policy.blocks(t)}
     if blocked:
         log.warning("egress: refusing request body; types=%s", sorted(blocked))
         return refusal(
@@ -229,7 +329,7 @@ def inspect(
             "request blocked by egress data policy",
             "blocked " + json.dumps(counts, sort_keys=True),
         )
-    if not findings:
+    if not counts:
         return PASS
     log.info("egress: redacted request body; findings=%s", counts)
     return Verdict("replace", body=json.dumps(data).encode(), detail=json.dumps(counts))

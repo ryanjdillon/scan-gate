@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from . import adapters
 from .config import Settings, get_settings
+from .egress.policy import warn_if_secrets_unblocked
 from .telemetry import Telemetry, telemetry
 
 #: The OTel service name when ``OTEL_SERVICE_NAME`` is unset.
@@ -23,13 +24,14 @@ def run(
     otel: Telemetry = telemetry,
     config: Settings | None = None,
 ) -> None:
-    """Warn of deprecated settings, configure telemetry, serve, then flush telemetry.
+    """Warn of deprecated or risky settings, configure telemetry, serve, then flush telemetry.
 
     ``config`` defaults to the settings loaded from the environment.
     """
     config = config or get_settings()
     for message in config.deprecations():
         log.warning(message)
+    warn_if_secrets_unblocked(config)
     otel.configure(SERVICE_NAME)
     try:
         serve()
