@@ -38,3 +38,17 @@ jobs:
             ghcr.io/ryanjdillon/scan-gate:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The secretscan sidecar: a separate distroless image, built from source.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: sidecar/secretscan
+          push: true
+          file: deploy/secretscan.Dockerfile
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/ryanjdillon/scan-gate-secretscan:latest
+            ghcr.io/ryanjdillon/scan-gate-secretscan:v${{ steps.version.outputs.version }}
+            ghcr.io/ryanjdillon/scan-gate-secretscan:${{ github.sha }}
+          cache-from: type=gha,scope=secretscan
+          cache-to: type=gha,mode=max,scope=secretscan

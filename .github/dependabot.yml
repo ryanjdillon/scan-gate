@@ -1,0 +1,23 @@
+# Proposes updates to pinned dependencies as reviewed PRs; nothing auto-merges.
+version: 2
+updates:
+  # The secretscan sidecar's Go modules (Betterleaks and its dependencies).
+  - package-ecosystem: gomod
+    directory: /sidecar/secretscan
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns: ["*"]
+
+  # Base image digests in deploy/*Dockerfile.
+  - package-ecosystem: docker
+    directory: /deploy
+    schedule:
+      interval: weekly
+
+  # Action SHAs pinned in .github/workflows.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
