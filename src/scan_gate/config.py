@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import cache
 from typing import Self
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Logged at startup while the deprecated ``CORPUS_SCAN_GATE_FAIL_OPEN`` is set.
@@ -53,6 +53,21 @@ class Settings(BaseSettings):
     # one message, so this must be at least the proxy's body buffer limit. grpc's
     # 4 MiB default refuses a chat body carrying an inline image.
     scan_gate_grpc_max_message_bytes: int = 50 * 1024 * 1024
+    # The Betterleaks secret-scan sidecar (sidecar/secretscan). Enabled by default:
+    # every scanned body's text is sent to it, and any failure refuses the request.
+    # Disabling it (local development without the sidecar) is logged at startup.
+    scan_gate_secretscan_enabled: bool = True
+    scan_gate_secretscan_socket: str = "/run/secretscan/sock"
+    # Seconds for a whole sidecar call: connect, send, and read the full
+    # response, so a sidecar dripping bytes cannot hold a request past it. The
+    # sidecar answers 504 at its own SECRETSCAN_TIMEOUT, but a scan on a
+    # multi-MB body notices cancellation a few hundred ms late; this must exceed
+    # it by a margin so the sidecar's own answer is the one seen. The default
+    # covers a sidecar run with SECRETSCAN_TIMEOUT=4s plus a 1 s margin.
+    scan_gate_secretscan_timeout: float = Field(default=5.0, gt=0)
+    # The sidecar's SECRETSCAN_MAX_BYTES: a request body over it is refused (413)
+    # without being sent. Keep the two equal.
+    scan_gate_secretscan_max_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
 
     @model_validator(mode="after")
     def _alias_agrees(self) -> Self:

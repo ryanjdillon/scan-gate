@@ -19,6 +19,30 @@ def test_defaults_match_the_corpus_scan_gate():
     assert loaded.scan_gate_grpc_max_message_bytes == 50 * 1024 * 1024
 
 
+def test_secretscan_defaults_match_the_sidecar():
+    loaded = Settings()
+    assert loaded.scan_gate_secretscan_enabled is True
+    assert loaded.scan_gate_secretscan_socket == "/run/secretscan/sock"
+    # A sidecar run with SECRETSCAN_TIMEOUT=4s plus a 1 s margin for its late cancellation.
+    assert loaded.scan_gate_secretscan_timeout == 5.0
+    assert loaded.scan_gate_secretscan_max_bytes == 8 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CORPUS_SCAN_GATE_SECRETSCAN_TIMEOUT", "0"),
+        ("CORPUS_SCAN_GATE_SECRETSCAN_TIMEOUT", "-1"),
+        ("CORPUS_SCAN_GATE_SECRETSCAN_MAX_BYTES", "0"),
+        ("CORPUS_SCAN_GATE_SECRETSCAN_ENABLED", "maybe"),
+    ],
+)
+def test_invalid_secretscan_settings_refuse_to_start(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings()
+
+
 def test_reads_corpus_prefixed_variables(monkeypatch):
     monkeypatch.setenv("CORPUS_HOST", "127.0.0.1")
     monkeypatch.setenv("CORPUS_SCAN_GATE_PORT", "9100")
