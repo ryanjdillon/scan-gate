@@ -18,6 +18,13 @@ from scan_gate._ext_proc.envoy.service.ext_proc.v3 import external_processor_pb2
 from scan_gate.config import Settings
 from scan_gate.egress import envoy
 from scan_gate.egress.policy import EgressPolicy, Verdict
+from scan_gate.egress.secretscan import (
+    SecretScanMalformed,
+    SecretScanner,
+    SecretScanStatus,
+    SecretScanTimeout,
+    SecretScanUnavailable,
+)
 
 
 @pytest.fixture
@@ -26,8 +33,16 @@ def policy():
 
 
 @pytest.fixture
-def processor(policy):
-    return envoy.EgressProcessor(policy=lambda: policy)
+def scanner():
+    """The secret-scan sidecar client, finding nothing unless a test says otherwise."""
+    mock = create_autospec(SecretScanner, instance=True)
+    mock.spans.return_value = []
+    return mock
+
+
+@pytest.fixture
+def processor(policy, scanner):
+    return envoy.EgressProcessor(scanner, policy=lambda: policy)
 
 
 @pytest.fixture
@@ -132,7 +147,9 @@ def failing_inspect():
 @pytest.mark.parametrize("pass_unparseable", [False, True])
 def test_inspection_error_is_always_refused(context, failing_inspect, pass_unparseable):
     processor = envoy.EgressProcessor(
-        policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable), inspect=failing_inspect
+        scanner,
+        policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable),
+        inspect=failing_inspect,
     )
     (response,) = processor.Process(iter([body("hi")]), context)
     immediate = response.immediate_response
@@ -156,9 +173,11 @@ def test_no_setting_passes_an_inspection_error(monkeypatch, context, env):
     for name, value in env.items():
         monkeypatch.setenv(name, value)
     loaded = Settings()
-    detector = create_autospec(envoy.inspect, side_effect=RuntimeError("leaked AKIAIOSFODNN7EXAMPLE"))
+    detector = create_autospec(
+        envoy.inspect, side_effect=RuntimeError("leaked AKIAIOSFODNN7EXAMPLE")
+    )
     processor = envoy.EgressProcessor(
-        policy=lambda: EgressPolicy.from_settings(loaded), inspect=detector
+        scanner, policy=lambda: EgressPolicy.from_settings(loaded), inspect=detector
     )
     (response,) = processor.Process(iter([body("hi")]), context)
     immediate = response.immediate_response
@@ -168,16 +187,16 @@ def test_no_setting_passes_an_inspection_error(monkeypatch, context, env):
         assert "AKIA" not in text and "RuntimeError" not in text
 
 
-def test_unparseable_body_follows_pass_unparseable(context):
+def test_unparseable_body_follows_pass_unparseable(context, scanner):
     multipart = ep.ProcessingRequest(
         request_body=ep.HttpBody(
             body=b"--boundary\r\nContent-Type: audio/wav\r\n\r\nRIFF", end_of_stream=True
         )
     )
-    closed = envoy.EgressProcessor(policy=lambda: EgressPolicy(pass_unparseable=False))
+    closed = envoy.EgressProcessor(scanner, policy=lambda: EgressPolicy(pass_unparseable=False))
     (refused,) = closed.Process(iter([multipart]), context)
     assert refused.immediate_response.status.code == 403
-    opened = envoy.EgressProcessor(policy=lambda: EgressPolicy(pass_unparseable=True))
+    opened = envoy.EgressProcessor(scanner, policy=lambda: EgressPolicy(pass_unparseable=True))
     (passed,) = opened.Process(iter([multipart]), context)
     assert passed.request_body.response.status == ep.CommonResponse.CONTINUE
 
@@ -195,11 +214,11 @@ def test_server_options_size_both_directions():
     }
 
 
-def test_unavailable_policy_is_refused(context):
+def test_unavailable_policy_is_refused(context, scanner):
     def broken_policy():
         raise RuntimeError("bad config")
 
-    processor = envoy.EgressProcessor(policy=broken_policy)
+    processor = envoy.EgressProcessor(scanner, policy=broken_policy)
     (response,) = processor.Process(iter([body("hi")]), context)
     assert response.immediate_response.status.code == 403
     assert "bad config" not in response.immediate_response.details
@@ -214,10 +233,10 @@ def test_deeply_nested_body_is_refused_as_a_scan_error(processor, context):
     assert immediate.details == "egress policy: scan_error"
 
 
-def test_inspection_error_logs_only_its_type(context, caplog):
+def test_inspection_error_logs_only_its_type(context, caplog, scanner):
     secret = "AKIAIOSFODNN7EXAMPLE"
     detector = create_autospec(envoy.inspect, side_effect=KeyError(f"leaked {secret}"))
-    processor = envoy.EgressProcessor(policy=EgressPolicy, inspect=detector)
+    processor = envoy.EgressProcessor(scanner, policy=EgressPolicy, inspect=detector)
     with caplog.at_level(logging.DEBUG):
         processor.Process(iter([body(f"mail {secret} please")]), context).__next__()
     logged = "\n".join(r.getMessage() for r in caplog.records)
@@ -237,7 +256,6 @@ def test_unknown_action_is_refused(caplog):
     assert "quarantine" in caplog.text
 
 
-
 def unbuffered(response: ep.ProcessingResponse) -> bool:
     immediate = response.immediate_response
     return (
@@ -250,7 +268,7 @@ def unbuffered(response: ep.ProcessingResponse) -> bool:
 @pytest.mark.parametrize("pass_unparseable", [False, True])
 def test_non_final_unparseable_chunk_is_refused_unbuffered(context, pass_unparseable):
     processor = envoy.EgressProcessor(
-        policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable)
+        scanner, policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable)
     )
     partial = raw_body(b'{"model": "DeepSeek-V4-Flash", "messa', final=False)
     (response,) = processor.Process(iter([partial]), context)
@@ -273,7 +291,7 @@ def test_non_final_json_body_is_scanned_as_a_whole_body(processor, context):
 )
 def test_final_unparseable_chunk_follows_pass_unparseable(context, pass_unparseable, detail):
     processor = envoy.EgressProcessor(
-        policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable)
+        scanner, policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable)
     )
     (response,) = processor.Process(iter([raw_body(b"RIFF....WAVE", final=True)]), context)
     if detail is None:
@@ -282,11 +300,48 @@ def test_final_unparseable_chunk_follows_pass_unparseable(context, pass_unparsea
         assert response.immediate_response.details == detail
 
 
-def test_final_chunk_after_an_earlier_chunk_is_not_a_whole_body(context):
+def test_final_chunk_after_an_earlier_chunk_is_not_a_whole_body(context, scanner):
     # A streamed body whose first chunk parses on its own: the remainder is a
     # fragment, so pass_unparseable must not wave it through.
-    processor = envoy.EgressProcessor(policy=lambda: EgressPolicy(pass_unparseable=True))
+    processor = envoy.EgressProcessor(scanner, policy=lambda: EgressPolicy(pass_unparseable=True))
     phases = [body("hi", final=False), raw_body(b' "secret tail"}', final=True)]
     first, rest = processor.Process(iter(phases), context)
     assert first.request_body.response.status == ep.CommonResponse.CONTINUE
     assert unbuffered(rest)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        SecretScanUnavailable("secretscan unavailable (ConnectionRefusedError)"),
+        SecretScanTimeout("secretscan timed out"),
+        SecretScanStatus(400),
+        SecretScanStatus(413),
+        SecretScanStatus(500),
+        SecretScanStatus(504),
+        SecretScanMalformed("secretscan response is malformed (JSONDecodeError)"),
+    ],
+    ids=lambda e: type(e).__name__ + str(getattr(e, "status", "")),
+)
+@pytest.mark.parametrize("pass_unparseable", [False, True])
+def test_every_sidecar_failure_is_refused_as_a_scan_error(
+    context, scanner, error, pass_unparseable, caplog
+):
+    scanner.spans.side_effect = error
+    processor = envoy.EgressProcessor(
+        scanner, policy=lambda: EgressPolicy(pass_unparseable=pass_unparseable)
+    )
+    with caplog.at_level(logging.DEBUG):
+        (response,) = processor.Process(iter([body("call me on lunch")]), context)
+    immediate = response.immediate_response
+    assert immediate.status.code == 403
+    assert immediate.details == "egress policy: scan_error"
+    assert type(error).__name__ in caplog.text
+    assert "lunch" not in caplog.text
+
+
+def test_the_processor_hands_its_scanner_to_the_policy(context, scanner):
+    detector = create_autospec(envoy.inspect, return_value=Verdict("pass"))
+    processor = envoy.EgressProcessor(scanner, policy=EgressPolicy, inspect=detector)
+    list(processor.Process(iter([body("hi")]), context))
+    assert detector.call_args.kwargs["scanner"] is scanner
