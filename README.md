@@ -31,6 +31,12 @@ that is not the final chunk is always refused (`unbuffered`); see
 TCP probe on the gRPC port: allow the detectors' cold start (Presidio loads in
 seconds).
 
+## Secret-scan sidecar
+
+`ghcr.io/ryanjdillon/scan-gate-secretscan:<tag>`, built from the same tag, is a
+Go sidecar that runs Betterleaks' ruleset as a library and returns secret spans
+over a Unix socket in the pod. See [sidecar/secretscan](sidecar/secretscan/README.md).
+
 ## Environment
 
 | Variable | Default |
