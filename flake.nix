@@ -23,6 +23,7 @@
             pkgs.just
             pkgs.ruff
             pkgs.commitlint
+            pkgs.go
           ];
           shellHook = ''
             # manylinux wheels (grpcio, numpy, …) dynamically link libstdc++ etc.,

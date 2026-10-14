@@ -42,9 +42,27 @@ commitlint BASE="origin/main":
         for c in $(git rev-list HEAD); do git log -1 --format=%B "$c" | commitlint; done
     fi
 
+# Format check, vet and unit tests for the secretscan sidecar (sidecar/secretscan).
+secretscan-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd sidecar/secretscan
+    unformatted=$(gofmt -l .)
+    if [ -n "$unformatted" ]; then echo "gofmt needed: $unformatted"; exit 1; fi
+    CGO_ENABLED=0 GOFLAGS=-mod=readonly go vet ./...
+    CGO_ENABLED=0 GOFLAGS=-mod=readonly go test ./...
+
+# p50/p99 latency of POST /scan at 1 KB, 64 KB and 1 MB.
+secretscan-bench:
+    cd sidecar/secretscan && CGO_ENABLED=0 GOFLAGS=-mod=readonly go test -run '^$' -bench Scan -benchtime 100x ./...
+
 # All pre-PR checks, mirroring CI. Run this (and fix any failures) before pushing.
-check: lint cov commitlint
+check: lint cov secretscan-test commitlint
 
 # Build the image locally (deploy/Dockerfile), tagged scan-gate:dev.
 image:
     docker build -f deploy/Dockerfile -t scan-gate:dev .
+
+# Build the secretscan sidecar image locally, tagged scan-gate-secretscan:dev.
+secretscan-image:
+    docker build -f deploy/secretscan.Dockerfile -t scan-gate-secretscan:dev sidecar/secretscan
