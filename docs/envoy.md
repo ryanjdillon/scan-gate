@@ -38,4 +38,11 @@ image and audio parts pass through byte-identical.
 
 What happens when the gate itself is unreachable is the proxy's choice, set per
 route (Envoy's `failure_mode_allow`): fail closed on routes whose bodies must
-never leave unscanned.
+never leave unscanned. The secretscan sidecar is not: the gate refuses a
+request it could not scan (`scan_error`) whatever the proxy's setting. The
+proxy's ext_proc message timeout must exceed the gate's sidecar budget
+(`CORPUS_SCAN_GATE_SECRETSCAN_TIMEOUT`, 5 s by default) plus the in-process
+detectors' time, or a slow scan becomes a proxy timeout instead of an answer.
+
+The adapter builds one sidecar client at startup and shares it across streams;
+it holds no connection, opening one per request.

@@ -2,27 +2,33 @@
 
 A fail-closed egress redactor for LLM request bodies. An AI gateway sends every
 request bound for a model provider through scan-gate first; scan-gate redacts
-PII and credentials, refuses what must never leave (a private key, an oversized
-batch body), and passes requests for locally served models unscanned. It logs
+PII and credentials, refuses what must never leave (a private key, any secret
+Betterleaks finds, an oversized batch body), and passes requests for locally
+served models unscanned. It logs
 detection types and counts, never a matched value or a body.
 
 It speaks Envoy's External Processing (`ext_proc`) gRPC protocol, so any
-Envoy-based gateway can call it. The detectors come from
-[corpus-detect](https://github.com/ryanjdillon/corpus/tree/main/packages/detect):
-its PII recognisers and its local credential rules only, with no external
-scanner binary.
+Envoy-based gateway can call it. The detectors are
+[corpus-detect](https://github.com/ryanjdillon/corpus/tree/main/packages/detect)'s
+PII recognisers and credential rules, in process, plus
+[Betterleaks](https://github.com/betterleaks/betterleaks)' ruleset in the
+[secretscan sidecar](#secret-scan-sidecar).
 
 ## Deployment
 
 The image is `ghcr.io/ryanjdillon/scan-gate:<tag>`, built by
 `.github/workflows/docker.yml` on each `v*` tag. Its entrypoint is `scan-gate`,
 which takes no arguments, so a pod runs it with no `command` and no `args`.
-It is stateless: it needs no database, volume or provider key, only the
-variables below.
+It is stateless: it needs no database or provider key, only the secretscan
+sidecar's socket and the variables below.
 
 ```sh
-docker run --rm -p 9002:9002 ghcr.io/ryanjdillon/scan-gate:v0.2.0
+docker run --rm -p 9002:9002 -v secretscan:/run/secretscan \
+  ghcr.io/ryanjdillon/scan-gate:v0.3.0
 ```
+
+With no sidecar on that socket every scanned request is refused; for a local
+trial without it, set `CORPUS_SCAN_GATE_SECRETSCAN_ENABLED=false`.
 
 Configure the gateway's ext_proc filter to send request headers and the request
 body in `Buffered` mode (request trailers are supported). An unparseable body
@@ -37,6 +43,14 @@ seconds).
 Go sidecar that runs Betterleaks' ruleset as a library and returns secret spans
 over a Unix socket in the pod. See [sidecar/secretscan](sidecar/secretscan/README.md).
 
+scan-gate needs it: run it in the same pod, sharing an `emptyDir` mounted at
+`/run/secretscan` in both containers. Every scanned body's text goes to it in
+one call, and **any sidecar failure refuses the request** (403 `scan_error`):
+unreachable, a timeout, any non-200, a malformed reply. A body whose text is
+over the sidecar's size limit is refused (413 `too_large_to_scan`) without
+being sent. A Betterleaks finding refuses the request (403) under the default
+`BLOCK_TYPES`. See [the policy](docs/policy.md#the-secret-scan-sidecar).
+
 ## Environment
 
 | Variable | Default |
@@ -47,17 +61,21 @@ over a Unix socket in the pod. See [sidecar/secretscan](sidecar/secretscan/READM
 | `CORPUS_SCAN_GATE_WORKERS` | `8` |
 | `CORPUS_SCAN_GATE_PASS_UNPARSEABLE` | `false` |
 | `CORPUS_SCAN_GATE_FAIL_OPEN` | deprecated alias of `PASS_UNPARSEABLE` |
-| `CORPUS_SCAN_GATE_BLOCK_TYPES` | `private_key` |
+| `CORPUS_SCAN_GATE_BLOCK_TYPES` | `private_key,secret:betterleaks:*` |
 | `CORPUS_SCAN_GATE_SKIP_MODELS` | none |
 | `CORPUS_SCAN_GATE_BATCH_CLIENTS` | none |
 | `CORPUS_SCAN_GATE_BATCH_MAX_BYTES` | `65536` |
 | `CORPUS_SCAN_GATE_GRPC_MAX_MESSAGE_BYTES` | 50 MiB |
+| `CORPUS_SCAN_GATE_SECRETSCAN_ENABLED` | `true` |
+| `CORPUS_SCAN_GATE_SECRETSCAN_SOCKET` | `/run/secretscan/sock` |
+| `CORPUS_SCAN_GATE_SECRETSCAN_TIMEOUT` | `5` (seconds, for the whole call) |
+| `CORPUS_SCAN_GATE_SECRETSCAN_MAX_BYTES` | 8 MiB |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | unset: no telemetry |
 | `OTEL_SERVICE_NAME` | `corpus-scan-gate` |
 
 Booleans accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off` (and
 `t`/`f`, `y`/`n`), in any case; any other value fails at startup. A detector
-error always refuses the request; no setting passes it.
+or sidecar error always refuses the request; no setting passes it.
 
 The names keep the `CORPUS_` prefix from when the gate shipped in the corpus
 image. What each does: [Configuration](docs/configuration.md); what happens to a
