@@ -10,8 +10,8 @@ dependencies = [
     # The deterministic PII/secret detectors and redaction, from the corpus repo,
     # pinned to the commit of a corpus release tag, so a moved tag cannot change
     # what is installed. Bump the SHA (and the tag comment) to take detector changes.
-    # corpus v0.6.2
-    "corpus-detect @ git+https://github.com/ryanjdillon/corpus@d08bcca0fe6152305c209b794bda5fb9e225720a#subdirectory=packages/detect",
+    # corpus v0.6.3
+    "corpus-detect @ git+https://github.com/ryanjdillon/corpus@7b57fd414228f7b4b55f7dcec8a99fba71f81c7a#subdirectory=packages/detect",
     # ext_proc server. grpcio is the runtime; protobuf is the well-known-types
     # runtime the vendored envoy/xds ext_proc stubs (scan_gate/_ext_proc/) were
     # generated against. Bounds track the gencode: grpcio>=1.74, protobuf 6.31+
