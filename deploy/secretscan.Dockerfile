@@ -6,7 +6,7 @@
 # and every download is checked against go.sum, so a tampered or re-tagged
 # module fails the build. GOTOOLCHAIN=local stops Go fetching a toolchain.
 # Both base images are pinned by digest; Dependabot proposes updates.
-FROM golang:1.26.7-bookworm@sha256:e8c859f5632dcfde7b32d2012b4351728f6437930887c2f6a91ea242459e5514 AS build
+FROM golang:1.27.0-bookworm@sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452 AS build
 ENV CGO_ENABLED=0 \
     GOFLAGS=-mod=readonly \
     GOTOOLCHAIN=local
