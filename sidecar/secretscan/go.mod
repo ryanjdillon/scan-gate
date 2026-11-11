@@ -3,8 +3,8 @@ module github.com/ryanjdillon/scan-gate/sidecar/secretscan
 go 1.26.0
 
 require (
-	github.com/betterleaks/betterleaks v1.9.0
-	github.com/rs/zerolog v1.33.0
+	github.com/betterleaks/betterleaks v1.10.0
+	github.com/rs/zerolog v1.35.1
 )
 
 require (
